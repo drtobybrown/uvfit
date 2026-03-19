@@ -128,16 +128,13 @@ class TemplateCubeModel(ForwardModel):
         return self._cell_size
 
     def generate_cube(self, params: dict[str, float]) -> np.ndarray:
-        dx = params.get("dx", 0.0)
-        dy = params.get("dy", 0.0)
+        # Spatial shifts (dx, dy) are applied in the NUFFT via Fourier phase ramp
+        # to preserve high-frequency information (super-resolution).
         dv = params.get("dv", 0.0)
         flux_scale = params.get("flux_scale", 1.0)
 
-        # Convert arcsec shifts to pixel shifts
-        dx_pix = dx / self._cell_size
-        dy_pix = dy / self._cell_size
-
-        # Apply 3D sub-pixel shift: (channel, y, x)
+        # Only spectral shift in image space; (dx, dy) handled in degrid
+        dx_pix, dy_pix = 0.0, 0.0
         shifted = ndshift(
             self._template,
             shift=[dv, dy_pix, dx_pix],
@@ -166,10 +163,14 @@ class KinMSModel(ForwardModel):
         Pixel size in arcseconds.
     channel_width_kms : float
         Channel width in km/s.
-    sbprof : callable
-        Surface brightness profile function r → SB(r).
-    velprof : callable
-        Velocity profile function r → v(r).
+    sbprof : array_like or callable
+        Surface brightness profile (array sampled at ``sbrad``, or callable).
+    velprof : array_like or callable
+        Velocity profile (array sampled at ``velrad``, or callable).
+    sbrad : array_like, optional
+        Radii corresponding to ``sbprof``. Required when ``sbprof`` is an array.
+    velrad : array_like, optional
+        Radii corresponding to ``velprof``. Defaults to ``sbrad`` if not given.
     """
 
     def __init__(
@@ -181,6 +182,8 @@ class KinMSModel(ForwardModel):
         channel_width_kms: float,
         sbprof: Any = None,
         velprof: Any = None,
+        sbrad: Any = None,
+        velrad: Any = None,
     ):
         self._xs = xs
         self._ys = ys
@@ -189,6 +192,8 @@ class KinMSModel(ForwardModel):
         self._channel_width = channel_width_kms
         self._sbprof = sbprof
         self._velprof = velprof
+        self._sbrad = sbrad
+        self._velrad = velrad
 
     @property
     def param_names(self) -> list[str]:
@@ -242,6 +247,12 @@ class KinMSModel(ForwardModel):
             vs=vel_range,
             cellSize=self._cell_size_arcsec,
             dv=self._channel_width,
+            beamSize=[self._cell_size_arcsec, self._cell_size_arcsec, 0],
+            fixSeed=True,
+            cleanOut=True,
+        )
+
+        mc_kwargs: dict[str, Any] = dict(
             inc=inc,
             posAng=pa,
             gasSigma=gas_sigma,
@@ -250,8 +261,12 @@ class KinMSModel(ForwardModel):
             sbProf=self._sbprof,
             velProf=self._velprof,
         )
+        if self._sbrad is not None:
+            mc_kwargs["sbRad"] = self._sbrad
+        if self._velrad is not None:
+            mc_kwargs["velRad"] = self._velrad
 
-        cube = kin.model_cube()
+        cube = kin.model_cube(**mc_kwargs)
 
         # KinMS returns (x, y, v), transpose to (v, y, x)
         if cube.ndim == 3:

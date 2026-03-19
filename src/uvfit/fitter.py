@@ -107,12 +107,20 @@ class Fitter:
         # Forward model: params → 3D cube
         cube = self.forward_model.generate_cube(params)
 
+        # Sub-pixel spatial shift via Fourier phase ramp (preserves high-freq info)
+        phase_shift = (
+            (params.get("dx", 0.0), params.get("dy", 0.0))
+            if ("dx" in params or "dy" in params)
+            else None
+        )
+
         # Degrid: cube + (u, v) → model visibilities
         model_vis = self.engine.degrid(
             cube=cube,
             u=self.uvdata.u,
             v=self.uvdata.v,
             freqs=self.uvdata.freqs,
+            phase_shift_arcsec=phase_shift,
         )
 
         # Likelihood: model_vis vs observed → χ²

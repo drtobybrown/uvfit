@@ -11,10 +11,15 @@ Two strategies:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
+
+
+def _arcsec_to_rad(arcsec: float) -> float:
+    """Convert arcseconds to radians."""
+    return arcsec * np.pi / (180.0 * 3600.0)
 
 
 class NUFFTEngine:
@@ -39,14 +44,19 @@ class NUFFTEngine:
         u: np.ndarray,
         v: np.ndarray,
         freqs: np.ndarray,
+        phase_shift_arcsec: Optional[Tuple[float, float]] = None,
     ) -> np.ndarray:
         """
         Compute model visibilities from a cube at specified (u, v) points.
 
+        Sub-pixel spatial shifts (dx, dy) in arcsec can be applied via a
+        Fourier phase ramp: V'(u,v) = V(u,v) * exp(-2πi (u·dx + v·dy)) in
+        radians, preserving high-frequency information (super-resolution).
+
         Parameters
         ----------
         cube : ndarray, shape (n_chan, ny, nx)
-            Model image cube (flux per pixel).
+            Model image cube (flux per pixel), centered at origin.
         u : ndarray, shape (n_baseline,)
             u-coordinates in wavelengths.
         v : ndarray, shape (n_baseline,)
@@ -54,6 +64,9 @@ class NUFFTEngine:
         freqs : ndarray, shape (n_chan,)
             Channel frequencies in Hz (used only for metadata; the cube
             already encodes the spectral structure).
+        phase_shift_arcsec : tuple (dx, dy), optional
+            Spatial shift in arcsec. If given, applied as phase ramp in
+            Fourier space (no image-space interpolation).
 
         Returns
         -------
@@ -61,69 +74,63 @@ class NUFFTEngine:
             Predicted visibilities.
         """
         if self._backend_name == "jax":
-            return self._degrid_jax(cube, u, v)
+            out = self._degrid_jax(cube, u, v, phase_shift_arcsec=phase_shift_arcsec)
         else:
-            return self._degrid_numpy(cube, u, v)
+            out = self._degrid_numpy(cube, u, v, phase_shift_arcsec=phase_shift_arcsec)
+        return out
 
     def _degrid_numpy(
-        self, cube: np.ndarray, u: np.ndarray, v: np.ndarray
+        self,
+        cube: np.ndarray,
+        u: np.ndarray,
+        v: np.ndarray,
+        phase_shift_arcsec: Optional[Tuple[float, float]] = None,
     ) -> np.ndarray:
         """
         CPU fallback: FFT each channel, then bilinear-interpolate at (u, v).
-
-        The FFT gives us the visibility function on a regular grid in
-        (u, v). We then interpolate to the actual baseline coordinates.
+        Optionally apply Fourier phase ramp for sub-pixel shift (dx, dy).
         """
         n_chan, ny, nx = cube.shape
         n_bl = u.shape[0]
 
-        # Pixel size in radians
         cell_rad = self._cell_size * np.pi / (180.0 * 3600.0)
-
-        # uv grid spacing: Δu = 1 / (N * Δθ)
-        du = 1.0 / (nx * cell_rad)
-        dv = 1.0 / (ny * cell_rad)
-
-        # uv grid coordinates (after fftshift)
         u_grid = np.fft.fftshift(np.fft.fftfreq(nx, d=cell_rad))
         v_grid = np.fft.fftshift(np.fft.fftfreq(ny, d=cell_rad))
 
         model_vis = np.zeros((n_bl, n_chan), dtype=np.complex128)
 
         for ch in range(n_chan):
-            # 2D FFT of the image (shift zero-frequency to center first)
             ft = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(cube[ch])))
-
-            # Interpolate real and imaginary parts separately
             interp_re = RegularGridInterpolator(
-                (v_grid, u_grid),
-                ft.real,
-                method="linear",
-                bounds_error=False,
-                fill_value=0.0,
+                (v_grid, u_grid), ft.real,
+                method="linear", bounds_error=False, fill_value=0.0,
             )
             interp_im = RegularGridInterpolator(
-                (v_grid, u_grid),
-                ft.imag,
-                method="linear",
-                bounds_error=False,
-                fill_value=0.0,
+                (v_grid, u_grid), ft.imag,
+                method="linear", bounds_error=False, fill_value=0.0,
             )
-
-            # Sample at (v, u) points — note the axis ordering
             points = np.stack([v, u], axis=-1)
             model_vis[:, ch] = interp_re(points) + 1j * interp_im(points)
+
+        # Sub-pixel spatial shift via phase ramp: V' = V * exp(-2π i (u·dx + v·dy)) [rad]
+        if phase_shift_arcsec is not None:
+            dx_a, dy_a = phase_shift_arcsec
+            dx_rad = _arcsec_to_rad(dx_a)
+            dy_rad = _arcsec_to_rad(dy_a)
+            phase = -2.0 * np.pi * (u * dx_rad + v * dy_rad)
+            model_vis *= np.exp(1j * phase)[:, np.newaxis]
 
         return model_vis
 
     def _degrid_jax(
-        self, cube: np.ndarray, u: np.ndarray, v: np.ndarray
+        self,
+        cube: np.ndarray,
+        u: np.ndarray,
+        v: np.ndarray,
+        phase_shift_arcsec: Optional[Tuple[float, float]] = None,
     ) -> np.ndarray:
         """
-        JAX path: differentiable FFT + bilinear interpolation.
-
-        Uses jax.numpy for the FFT and a custom differentiable
-        bilinear interpolation. Falls back to jax-finufft if available.
+        JAX path: differentiable FFT + bilinear interpolation + optional phase ramp.
         """
         try:
             import jax
@@ -148,7 +155,16 @@ class NUFFTEngine:
             return self._bilinear_interp_jax(ft, u_grid, v_grid, u_j, v_j)
 
         model_vis = jax.vmap(degrid_channel)(cube_j)  # (n_chan, n_bl)
-        return np.asarray(model_vis.T)  # (n_bl, n_chan)
+        model_vis = model_vis.T  # (n_bl, n_chan)
+
+        if phase_shift_arcsec is not None:
+            dx_a, dy_a = phase_shift_arcsec
+            dx_rad = _arcsec_to_rad(dx_a)
+            dy_rad = _arcsec_to_rad(dy_a)
+            phase = -2.0 * jnp.pi * (u_j * dx_rad + v_j * dy_rad)
+            model_vis = model_vis * jnp.exp(1j * phase)[:, jnp.newaxis]
+
+        return np.asarray(model_vis)
 
     @staticmethod
     def _bilinear_interp_jax(grid, u_coords, v_coords, u_query, v_query):
