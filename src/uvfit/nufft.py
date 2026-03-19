@@ -93,11 +93,13 @@ class NUFFTEngine:
         n_chan, ny, nx = cube.shape
         n_bl = u.shape[0]
 
+        cdtype = np.complex64 if cube.dtype == np.float32 else np.complex128
+
         cell_rad = self._cell_size * np.pi / (180.0 * 3600.0)
         u_grid = np.fft.fftshift(np.fft.fftfreq(nx, d=cell_rad))
         v_grid = np.fft.fftshift(np.fft.fftfreq(ny, d=cell_rad))
 
-        model_vis = np.zeros((n_bl, n_chan), dtype=np.complex128)
+        model_vis = np.zeros((n_bl, n_chan), dtype=cdtype)
 
         for ch in range(n_chan):
             ft = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(cube[ch])))

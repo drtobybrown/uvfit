@@ -184,6 +184,7 @@ class KinMSModel(ForwardModel):
         velprof: Any = None,
         sbrad: Any = None,
         velrad: Any = None,
+        precision: str = "double",
     ):
         self._xs = xs
         self._ys = ys
@@ -194,6 +195,7 @@ class KinMSModel(ForwardModel):
         self._velprof = velprof
         self._sbrad = sbrad
         self._velrad = velrad
+        self._out_dtype = np.float32 if precision == "single" else np.float64
 
     @property
     def param_names(self) -> list[str]:
@@ -272,4 +274,4 @@ class KinMSModel(ForwardModel):
         if cube.ndim == 3:
             cube = np.transpose(cube, (2, 1, 0))
 
-        return cube.astype(np.float64)
+        return cube.astype(self._out_dtype)

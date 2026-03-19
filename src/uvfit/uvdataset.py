@@ -13,6 +13,12 @@ from typing import Optional
 import numpy as np
 
 
+_PRECISION_DTYPES = {
+    "single": (np.float32, np.complex64),
+    "double": (np.float64, np.complex128),
+}
+
+
 @dataclass
 class UVDataset:
     """
@@ -30,6 +36,9 @@ class UVDataset:
         Statistical weights (1/σ²).
     freqs : ndarray, shape (n_chan,)
         Channel frequencies in Hz.
+    precision : str
+        ``"single"`` for float32/complex64, ``"double"`` (default) for
+        float64/complex128.
     """
 
     u: np.ndarray
@@ -37,12 +46,18 @@ class UVDataset:
     vis_data: np.ndarray
     weights: np.ndarray
     freqs: np.ndarray
+    precision: str = "double"
 
     def __post_init__(self) -> None:
-        self.u = np.asarray(self.u, dtype=np.float64)
-        self.v = np.asarray(self.v, dtype=np.float64)
-        self.vis_data = np.asarray(self.vis_data, dtype=np.complex128)
-        self.weights = np.asarray(self.weights, dtype=np.float64)
+        if self.precision not in _PRECISION_DTYPES:
+            raise ValueError(
+                f"precision must be 'single' or 'double', got {self.precision!r}"
+            )
+        fdtype, cdtype = _PRECISION_DTYPES[self.precision]
+        self.u = np.asarray(self.u, dtype=fdtype)
+        self.v = np.asarray(self.v, dtype=fdtype)
+        self.vis_data = np.asarray(self.vis_data, dtype=cdtype)
+        self.weights = np.asarray(self.weights, dtype=fdtype)
         self.freqs = np.asarray(self.freqs, dtype=np.float64)
 
         # Basic shape validation

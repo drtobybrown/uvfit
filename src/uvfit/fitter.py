@@ -173,6 +173,7 @@ class Fitter:
         n_walkers: int = 32,
         n_steps: int = 500,
         n_burn: int = 100,
+        n_processes: int = 1,
         **kwargs,
     ) -> FitResult:
         """
@@ -196,6 +197,9 @@ class Fitter:
             Number of MCMC steps (emcee only). Default: 500.
         n_burn : int
             Number of burn-in steps to discard (emcee only). Default: 100.
+        n_processes : int
+            Number of parallel processes for walker evaluation (emcee only).
+            Default: 1 (serial). Values > 1 use ``multiprocessing.Pool``.
         **kwargs
             Additional keyword arguments passed to the optimizer.
 
@@ -215,6 +219,7 @@ class Fitter:
             return self._fit_emcee(
                 p0, param_names, bounds, priors,
                 n_walkers=n_walkers, n_steps=n_steps, n_burn=n_burn,
+                n_processes=n_processes,
                 **kwargs,
             )
         elif method.lower() == "dynesty":
@@ -270,12 +275,15 @@ class Fitter:
         n_walkers: int = 32,
         n_steps: int = 500,
         n_burn: int = 100,
+        n_processes: int = 1,
         **kwargs,
     ) -> FitResult:
         """
         MCMC sampling with emcee.
 
         Returns the full chain and the maximum-a-posteriori (MAP) estimate.
+        When *n_processes* > 1, walker evaluations within each step are
+        distributed across a ``multiprocessing.Pool``.
         """
         try:
             import emcee
@@ -287,20 +295,29 @@ class Fitter:
 
         n_dim = len(param_names)
 
-        # Initialize walkers in a small ball around p0
         rng = kwargs.pop("rng", np.random.default_rng(42))
         pos = p0 + 1e-4 * rng.standard_normal((n_walkers, n_dim))
 
-        sampler = emcee.EnsembleSampler(
-            n_walkers,
-            n_dim,
-            self._log_prob,
-            args=(param_names, bounds, priors),
-            **kwargs,
-        )
+        pool = None
+        if n_processes > 1:
+            from multiprocessing import Pool
+            pool = Pool(n_processes)
 
-        # Run MCMC
-        sampler.run_mcmc(pos, n_steps, progress=True)
+        try:
+            sampler = emcee.EnsembleSampler(
+                n_walkers,
+                n_dim,
+                self._log_prob,
+                args=(param_names, bounds, priors),
+                pool=pool,
+                **kwargs,
+            )
+
+            sampler.run_mcmc(pos, n_steps, progress=True)
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
 
         # Extract chains (discard burn-in)
         chains = sampler.get_chain(discard=n_burn)  # (n_steps-burn, n_walkers, n_dim)
