@@ -59,6 +59,8 @@ class FitResult:
     chains: np.ndarray | None = None
     log_prob: np.ndarray | None = None
     raw_result: Any = None
+    autocorr_time: np.ndarray | None = None
+    converged: bool | None = None
 
 
 class Fitter:
@@ -74,8 +76,6 @@ class Fitter:
         The observed visibility data.
     forward_model : ForwardModel
         The model to fit.
-    backend : str
-        Array backend ("numpy" or "jax"). Default: "numpy".
 
     Examples
     --------
@@ -88,15 +88,11 @@ class Fitter:
         self,
         uvdata: UVDataset,
         forward_model: ForwardModel,
-        backend: str = "numpy",
     ):
         self.uvdata = uvdata
         self.forward_model = forward_model
-        self.engine = NUFFTEngine(
-            cell_size=forward_model.cell_size, backend=backend
-        )
+        self.engine = NUFFTEngine(cell_size=forward_model.cell_size)
         self.likelihood = VisibilityLikelihood()
-        self._backend = backend
 
     def _objective(self, param_vector: np.ndarray, param_names: list[str]) -> float:
         """
@@ -174,6 +170,12 @@ class Fitter:
         n_steps: int = 500,
         n_burn: int = 100,
         n_processes: int = 1,
+        # Tau-based convergence (emcee only)
+        converge: bool = False,
+        check_interval: int = 500,
+        tau_factor: float = 50.0,
+        tau_rtol: float = 0.01,
+        max_steps: int = 10000,
         **kwargs,
     ) -> FitResult:
         """
@@ -194,12 +196,22 @@ class Fitter:
         n_walkers : int
             Number of MCMC walkers (emcee only). Default: 32.
         n_steps : int
-            Number of MCMC steps (emcee only). Default: 500.
+            Number of MCMC steps when *converge* is False (emcee only).
         n_burn : int
-            Number of burn-in steps to discard (emcee only). Default: 100.
+            Burn-in steps to discard when *converge* is False (emcee only).
         n_processes : int
-            Number of parallel processes for walker evaluation (emcee only).
-            Default: 1 (serial). Values > 1 use ``multiprocessing.Pool``.
+            Parallel processes for walker evaluation (emcee only).
+        converge : bool
+            If True, run emcee until the integrated autocorrelation time
+            (tau) stabilises, ignoring *n_steps* and *n_burn*.
+        check_interval : int
+            Steps between convergence checks (emcee + converge only).
+        tau_factor : float
+            Require total steps > tau_factor * max(tau).
+        tau_rtol : float
+            Require relative change in tau < tau_rtol between checks.
+        max_steps : int
+            Hard safety cap on total steps (emcee + converge only).
         **kwargs
             Additional keyword arguments passed to the optimizer.
 
@@ -207,7 +219,6 @@ class Fitter:
         -------
         FitResult
         """
-        # Resolve parameters
         if initial_params is None:
             initial_params = self.forward_model.default_params.copy()
 
@@ -220,6 +231,11 @@ class Fitter:
                 p0, param_names, bounds, priors,
                 n_walkers=n_walkers, n_steps=n_steps, n_burn=n_burn,
                 n_processes=n_processes,
+                converge=converge,
+                check_interval=check_interval,
+                tau_factor=tau_factor,
+                tau_rtol=tau_rtol,
+                max_steps=max_steps,
                 **kwargs,
             )
         elif method.lower() == "dynesty":
@@ -276,14 +292,25 @@ class Fitter:
         n_steps: int = 500,
         n_burn: int = 100,
         n_processes: int = 1,
+        converge: bool = False,
+        check_interval: int = 500,
+        tau_factor: float = 50.0,
+        tau_rtol: float = 0.01,
+        max_steps: int = 10000,
         **kwargs,
     ) -> FitResult:
         """
         MCMC sampling with emcee.
 
-        Returns the full chain and the maximum-a-posteriori (MAP) estimate.
-        When *n_processes* > 1, walker evaluations within each step are
-        distributed across a ``multiprocessing.Pool``.
+        When *converge* is True, the sampler runs in chunks of
+        *check_interval* steps and checks the integrated autocorrelation
+        time (tau) after each chunk.  Sampling stops when both criteria
+        are met: ``total_steps > tau_factor * max(tau)`` **and** tau has
+        stabilised to within *tau_rtol* between consecutive checks.
+        Burn-in is automatically set to ``2 * max(tau)``.
+
+        When *converge* is False, the sampler runs for a fixed *n_steps*
+        and discards *n_burn* as burn-in (original behaviour).
         """
         try:
             import emcee
@@ -303,6 +330,9 @@ class Fitter:
             from multiprocessing import Pool
             pool = Pool(n_processes)
 
+        tau_est: np.ndarray | None = None
+        did_converge: bool | None = None
+
         try:
             sampler = emcee.EnsembleSampler(
                 n_walkers,
@@ -313,23 +343,67 @@ class Fitter:
                 **kwargs,
             )
 
-            sampler.run_mcmc(pos, n_steps, progress=True)
+            if converge:
+                old_tau = np.full(n_dim, np.inf)
+                total_steps = 0
+
+                while total_steps < max_steps:
+                    chunk = min(check_interval, max_steps - total_steps)
+                    sampler.run_mcmc(
+                        pos if total_steps == 0 else None,
+                        chunk, progress=True,
+                    )
+                    total_steps += chunk
+
+                    try:
+                        tau = sampler.get_autocorr_time(quiet=True)
+                    except emcee.autocorr.AutocorrError:
+                        continue
+
+                    enough_steps = total_steps > tau_factor * np.max(tau)
+                    tau_stable = np.all(
+                        np.abs(tau - old_tau) / old_tau < tau_rtol
+                    )
+
+                    if enough_steps and tau_stable:
+                        did_converge = True
+                        tau_est = tau
+                        break
+
+                    old_tau = tau.copy()
+
+                if did_converge is None:
+                    did_converge = False
+                    warnings.warn(
+                        f"emcee did not converge within {max_steps} steps. "
+                        "Consider increasing --max-steps.",
+                        stacklevel=2,
+                    )
+                    try:
+                        tau_est = sampler.get_autocorr_time(quiet=True)
+                    except emcee.autocorr.AutocorrError:
+                        tau_est = None
+
+                if tau_est is not None:
+                    n_burn = int(2 * np.max(tau_est))
+                else:
+                    n_burn = total_steps // 5
+                n_steps = total_steps
+            else:
+                sampler.run_mcmc(pos, n_steps, progress=True)
         finally:
             if pool is not None:
                 pool.close()
                 pool.join()
 
-        # Extract chains (discard burn-in)
-        chains = sampler.get_chain(discard=n_burn)  # (n_steps-burn, n_walkers, n_dim)
-        log_prob = sampler.get_log_prob(discard=n_burn)
+        chains = sampler.get_chain(discard=n_burn)
+        log_prob_chain = sampler.get_log_prob(discard=n_burn)
 
-        # MAP estimate: highest log-prob sample
         flat_chains = sampler.get_chain(discard=n_burn, flat=True)
         flat_log_prob = sampler.get_log_prob(discard=n_burn, flat=True)
         best_idx = np.argmax(flat_log_prob)
         best_params = dict(zip(param_names, flat_chains[best_idx]))
 
-        # Compute χ² at MAP
         chi2 = self._objective(flat_chains[best_idx], param_names)
         n_data = 2 * self.uvdata.vis_data.size
         dof = max(n_data - n_dim, 1)
@@ -342,8 +416,10 @@ class Fitter:
             success=True,
             method="emcee",
             chains=chains,
-            log_prob=log_prob,
+            log_prob=log_prob_chain,
             raw_result=sampler,
+            autocorr_time=tau_est,
+            converged=did_converge,
         )
 
     def _fit_dynesty(

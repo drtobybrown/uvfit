@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
+from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import shift as ndshift
 
 
@@ -275,3 +276,118 @@ class KinMSModel(ForwardModel):
             cube = np.transpose(cube, (2, 1, 0))
 
         return cube.astype(self._out_dtype)
+
+
+def gnfw_circular_velocity(
+    radius: np.ndarray,
+    vmax: float,
+    r_scale: float,
+    gamma: float,
+) -> np.ndarray:
+    """
+    Circular velocity curve for a generalized NFW (gNFW) halo.
+
+    The gNFW density profile is:
+        rho(r) ~ 1 / [(r/r_s)^gamma * (1 + r/r_s)^(3 - gamma)]
+
+    gamma = 0 gives a flat central core, gamma = 1 gives classical NFW.
+
+    Parameters
+    ----------
+    radius : ndarray
+        Radial sampling points (arcsec).
+    vmax : float
+        Peak circular velocity (km/s).
+    r_scale : float
+        Scale radius (arcsec).
+    gamma : float
+        Inner density slope (0 = core, 1 = NFW cusp).
+
+    Returns
+    -------
+    vc : ndarray
+        Circular velocity at each radius, normalized to peak at *vmax*.
+    """
+    x = radius / r_scale
+    integrand = x ** (2.0 - gamma) / (1.0 + x) ** (3.0 - gamma)
+    mass_enc = cumulative_trapezoid(integrand, x, initial=0.0)
+    v_over_r = mass_enc / x
+    v_over_r[0] = 0.0
+    peak = np.max(v_over_r)
+    if peak == 0.0:
+        return np.zeros_like(radius)
+    return vmax * np.sqrt(v_over_r / peak)
+
+
+class gNFWKinMSModel(KinMSModel):
+    """
+    KinMS forward model with a generalized NFW velocity profile.
+
+    Adds ``gamma`` (inner density slope) as a free parameter that is
+    recomputed at every likelihood evaluation.  gamma = 0 corresponds to a
+    flat core and gamma = 1 to a classical NFW cusp.
+
+    Parameters
+    ----------
+    vmax : float
+        Peak circular velocity (km/s), held fixed.
+    r_scale : float
+        Scale radius (arcsec), held fixed.
+    radius : array_like
+        Radial sampling grid (arcsec) for the velocity and SB profiles.
+    xs, ys, vs, cell_size_arcsec, channel_width_kms, sbprof, sbrad, precision
+        Forwarded to :class:`KinMSModel`.
+    """
+
+    def __init__(
+        self,
+        *,
+        vmax: float,
+        r_scale: float,
+        radius: np.ndarray,
+        xs: int,
+        ys: int,
+        vs: int,
+        cell_size_arcsec: float,
+        channel_width_kms: float,
+        sbprof: Any = None,
+        sbrad: Any = None,
+        precision: str = "double",
+    ):
+        self._vmax = float(vmax)
+        self._r_scale = float(r_scale)
+        self._radius = np.asarray(radius, dtype=np.float64)
+
+        super().__init__(
+            xs=xs, ys=ys, vs=vs,
+            cell_size_arcsec=cell_size_arcsec,
+            channel_width_kms=channel_width_kms,
+            sbprof=sbprof,
+            velprof=None,
+            sbrad=sbrad,
+            velrad=self._radius,
+            precision=precision,
+        )
+
+    @property
+    def param_names(self) -> list[str]:
+        return ["inc", "pa", "flux", "vsys", "gas_sigma", "gamma"]
+
+    @property
+    def default_params(self) -> dict[str, float]:
+        base = super().default_params
+        base["gamma"] = 0.5
+        return base
+
+    @property
+    def bounds(self) -> dict[str, tuple[float, float]]:
+        base = super().bounds
+        base["gamma"] = (0.0, 2.0)
+        return base
+
+    def generate_cube(self, params: dict[str, float]) -> np.ndarray:
+        gamma = params.get("gamma", 0.5)
+        self._velprof = gnfw_circular_velocity(
+            self._radius, self._vmax, self._r_scale, gamma,
+        )
+        return super().generate_cube(params)

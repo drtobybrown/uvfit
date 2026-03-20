@@ -2,11 +2,7 @@
 NUFFT / degridding engine for uvfit.
 
 Transforms a 3D image cube into model visibilities at arbitrary (u, v)
-coordinates. Uses per-channel 2D transforms.
-
-Two strategies:
-- CPU fallback: FFT + bilinear interpolation in the uv-plane
-- JAX: jax.numpy.fft + differentiable interpolation (or jax-finufft if available)
+coordinates using per-channel 2D FFT + bilinear interpolation.
 """
 
 from __future__ import annotations
@@ -30,13 +26,10 @@ class NUFFTEngine:
     ----------
     cell_size : float
         Pixel size in arcseconds.
-    backend : str
-        Array backend name ("numpy" or "jax"). Default: "numpy".
     """
 
-    def __init__(self, cell_size: float, backend: str = "numpy"):
+    def __init__(self, cell_size: float):
         self._cell_size = float(cell_size)
-        self._backend_name = backend
 
     def degrid(
         self,
@@ -73,23 +66,6 @@ class NUFFTEngine:
         model_vis : ndarray, shape (n_baseline, n_chan), complex
             Predicted visibilities.
         """
-        if self._backend_name == "jax":
-            out = self._degrid_jax(cube, u, v, phase_shift_arcsec=phase_shift_arcsec)
-        else:
-            out = self._degrid_numpy(cube, u, v, phase_shift_arcsec=phase_shift_arcsec)
-        return out
-
-    def _degrid_numpy(
-        self,
-        cube: np.ndarray,
-        u: np.ndarray,
-        v: np.ndarray,
-        phase_shift_arcsec: Optional[Tuple[float, float]] = None,
-    ) -> np.ndarray:
-        """
-        CPU fallback: FFT each channel, then bilinear-interpolate at (u, v).
-        Optionally apply Fourier phase ramp for sub-pixel shift (dx, dy).
-        """
         n_chan, ny, nx = cube.shape
         n_bl = u.shape[0]
 
@@ -114,7 +90,6 @@ class NUFFTEngine:
             points = np.stack([v, u], axis=-1)
             model_vis[:, ch] = interp_re(points) + 1j * interp_im(points)
 
-        # Sub-pixel spatial shift via phase ramp: V' = V * exp(-2π i (u·dx + v·dy)) [rad]
         if phase_shift_arcsec is not None:
             dx_a, dy_a = phase_shift_arcsec
             dx_rad = _arcsec_to_rad(dx_a)
@@ -123,86 +98,3 @@ class NUFFTEngine:
             model_vis *= np.exp(1j * phase)[:, np.newaxis]
 
         return model_vis
-
-    def _degrid_jax(
-        self,
-        cube: np.ndarray,
-        u: np.ndarray,
-        v: np.ndarray,
-        phase_shift_arcsec: Optional[Tuple[float, float]] = None,
-    ) -> np.ndarray:
-        """
-        JAX path: differentiable FFT + bilinear interpolation + optional phase ramp.
-        """
-        try:
-            import jax
-            import jax.numpy as jnp
-        except ImportError:
-            raise ImportError(
-                "JAX backend requires jax. Install with: pip install uvfit[jax]"
-            )
-
-        cube_j = jnp.array(cube)
-        u_j = jnp.array(u)
-        v_j = jnp.array(v)
-
-        cell_rad = self._cell_size * jnp.pi / (180.0 * 3600.0)
-        n_chan, ny, nx = cube_j.shape
-
-        u_grid = jnp.fft.fftshift(jnp.fft.fftfreq(nx, d=cell_rad))
-        v_grid = jnp.fft.fftshift(jnp.fft.fftfreq(ny, d=cell_rad))
-
-        def degrid_channel(image_2d):
-            ft = jnp.fft.fftshift(jnp.fft.fft2(jnp.fft.ifftshift(image_2d)))
-            return self._bilinear_interp_jax(ft, u_grid, v_grid, u_j, v_j)
-
-        model_vis = jax.vmap(degrid_channel)(cube_j)  # (n_chan, n_bl)
-        model_vis = model_vis.T  # (n_bl, n_chan)
-
-        if phase_shift_arcsec is not None:
-            dx_a, dy_a = phase_shift_arcsec
-            dx_rad = _arcsec_to_rad(dx_a)
-            dy_rad = _arcsec_to_rad(dy_a)
-            phase = -2.0 * jnp.pi * (u_j * dx_rad + v_j * dy_rad)
-            model_vis = model_vis * jnp.exp(1j * phase)[:, jnp.newaxis]
-
-        return np.asarray(model_vis)
-
-    @staticmethod
-    def _bilinear_interp_jax(grid, u_coords, v_coords, u_query, v_query):
-        """
-        Differentiable bilinear interpolation on a regular 2D grid.
-        """
-        import jax.numpy as jnp
-
-        ny, nx = grid.shape
-
-        # Convert physical coords to fractional pixel indices
-        du = u_coords[1] - u_coords[0]
-        dv = v_coords[1] - v_coords[0]
-
-        x_frac = (u_query - u_coords[0]) / du
-        y_frac = (v_query - v_coords[0]) / dv
-
-        # Clamp to valid range
-        x_frac = jnp.clip(x_frac, 0, nx - 1.001)
-        y_frac = jnp.clip(y_frac, 0, ny - 1.001)
-
-        x0 = jnp.floor(x_frac).astype(jnp.int32)
-        y0 = jnp.floor(y_frac).astype(jnp.int32)
-        x1 = x0 + 1
-        y1 = y0 + 1
-
-        x1 = jnp.minimum(x1, nx - 1)
-        y1 = jnp.minimum(y1, ny - 1)
-
-        wx = x_frac - x0
-        wy = y_frac - y0
-
-        val = (
-            grid[y0, x0] * (1 - wx) * (1 - wy)
-            + grid[y0, x1] * wx * (1 - wy)
-            + grid[y1, x0] * (1 - wx) * wy
-            + grid[y1, x1] * wx * wy
-        )
-        return val

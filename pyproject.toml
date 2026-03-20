@@ -28,13 +28,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-jax = [
-    "jax>=0.4",
-    "jaxlib>=0.4",
-]
-torch = [
-    "torch>=2.0",
-]
 kinms = [
     "kinms>=3.0",
 ]
@@ -56,7 +49,7 @@ dev = [
     "pytest-cov>=4.0",
 ]
 all = [
-    "uvfit[jax,kinms,xradio,mcmc,dev]",
+    "uvfit[kinms,xradio,mcmc,dev]",
 ]
 
 [project.urls]
@@ -72,7 +65,6 @@ testpaths = ["tests"]
 addopts = "-v --benchmark-disable"
 markers = [
     "benchmark: marks tests as benchmarks (deselect with '--benchmark-disable')",
-    "gpu: marks tests requiring GPU (deselect with '-m \"not gpu\"')",
 ]
 
 [tool.setuptools_scm]

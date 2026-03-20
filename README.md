@@ -10,24 +10,21 @@ spectral-line cubes (e.g., ALMA CO measurement sets).
 ## Features
 
 - **Visibility-space fitting** — compare models to data in the Fourier domain
-- **Differentiable pipeline** — supports gradient-based optimization via JAX
 - **Flexible models** — use an existing image cube as a template, or generate
   cubes from physical parameters with [KinMS](https://kinms.space)
-- **GPU-accelerated** — optional JAX/PyTorch backends for production workloads
+- **gNFW support** — generalized NFW forward model with free inner slope (gamma)
+- **Tau convergence** — autocorrelation-time-based stopping for emcee MCMC
 - **xradio I/O** — reads measurement sets via the
   [xradio](https://xradio.readthedocs.io) MSv4 schema
 
 ## Quick Start
 
 ```bash
-# Install (CPU-only, for development/testing)
+# Install for development/testing
 pip install -e ".[dev]"
 
 # Run tests
 pytest
-
-# Install with JAX GPU support
-pip install -e ".[jax,dev]"
 ```
 
 ### Minimum Working Example
@@ -62,7 +59,7 @@ Parameters → ForwardModel → 3D Cube → NUFFT → Model Visibilities → χ�
 
 **Models:** Two main paths. (1) **TemplateCubeModel** — shift and scale a reference cube (dx, dy, dv, flux_scale); good for registration and flux scaling when the template is given. (2) **KinMSModel** (or custom ForwardModel) — map **physical** parameters (inclination, PA, velocity profile, etc.) to a cube, then to visibilities; use this to infer physical parameters directly from visibilities without circularity.
 
-**Backends:** The NUFFT and gradient computation can run on CPU (NumPy/SciPy), or on GPU via optional JAX/PyTorch backends for faster fitting.
+**NUFFT:** The degridding engine uses NumPy/SciPy FFT + bilinear interpolation to transform model cubes into visibilities at arbitrary (u, v) coordinates.
 
 ### How TemplateCubeModel works
 
@@ -109,7 +106,7 @@ Parameters → ForwardModel → 3D Cube → NUFFT → Model Visibilities → χ�
 **Result**
 
 - Output is a 3D float64 array of shape `(n_chan, ny, nx)`, in the same grid as the template.  
-- The fitter then uses this cube with the NUFFT (and optional backends) to compute model visibilities and χ² against the `UVDataset`.  
+- The fitter then uses this cube with the NUFFT to compute model visibilities and χ² against the `UVDataset`.  
 - Typical use: template = observed or simulated cube; fit `(dx, dy, dv, flux_scale)` so that the shifted, scaled template best matches the visibility data in the Fourier domain.
 
 ### Comparison with galario
