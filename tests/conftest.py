@@ -65,8 +65,9 @@ def make_mock_uvdata(
     v = rng.uniform(-v_grid.max() * 0.8, v_grid.max() * 0.8, n_baselines)
 
     vis = np.zeros((n_baselines, n_chan), dtype=np.complex128)
+    pixel_solid_angle = cell_rad ** 2  # must match NUFFTEngine.degrid scaling
     for ch in range(n_chan):
-        ft = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(cube[ch])))
+        ft = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(cube[ch]))) * pixel_solid_angle
         interp_re = RegularGridInterpolator(
             (v_grid, u_grid), ft.real, method="linear",
             bounds_error=False, fill_value=0.0,

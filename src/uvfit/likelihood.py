@@ -16,11 +16,34 @@ class VisibilityLikelihood:
 
     The statistic is:
 
-        χ² = Σᵢ wᵢ |V_obs,i − V_mod,i|²
+        χ² = Σᵢ (wᵢ · s) |V_obs,i − V_mod,i|²
 
     where the sum runs over all baselines × channels, wᵢ = 1/σᵢ²,
+    s is the ``weight_scale_factor`` (default 1.0; use 0.5 for
+    Hanning-smoothed ALMA data to account for spectral covariance),
     and |·|² denotes the squared complex modulus (real² + imag²).
+
+    Parameters
+    ----------
+    weight_scale_factor : float
+        Multiplicative correction applied to CASA-exported visibility
+        weights before computing χ².  For Hanning-smoothed ALMA data,
+        adjacent channels have ~50 % correlated noise, so the effective
+        independent DoF is roughly halved; set to 0.5 in that case.
+        Default: 1.0 (no correction).
     """
+
+    def __init__(self, weight_scale_factor: float = 1.0) -> None:
+        if weight_scale_factor <= 0.0:
+            raise ValueError(
+                f"weight_scale_factor must be positive; got {weight_scale_factor}"
+            )
+        self._weight_scale_factor = float(weight_scale_factor)
+
+    @property
+    def weight_scale_factor(self) -> float:
+        """Current weight scaling factor."""
+        return self._weight_scale_factor
 
     def chi_squared(
         self,
@@ -42,7 +65,8 @@ class VisibilityLikelihood:
         chi2 : float
         """
         residual = observed_vis - model_vis
-        return float(np.sum(weights * np.abs(residual) ** 2))
+        scaled_weights = weights * self._weight_scale_factor
+        return float(np.sum(scaled_weights * np.abs(residual) ** 2))
 
     def reduced_chi_squared(
         self,

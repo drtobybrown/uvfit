@@ -31,6 +31,7 @@ class TestNUFFTEngine:
         # Random uv points (within grid limits)
         rng = np.random.default_rng(123)
         cell_rad = cell_size * np.pi / (180.0 * 3600.0)
+        pixel_solid_angle = cell_rad ** 2
         u_max = 0.4 / cell_rad  # stay well within grid
         n_bl = 50
         u = rng.uniform(-u_max, u_max, n_bl)
@@ -41,11 +42,11 @@ class TestNUFFTEngine:
         model_vis = engine.degrid(cube, u, v, freqs)
 
         # All visibilities should have approximately the same amplitude
-        # (a centered point source has flat |V(u,v)| = 1)
+        # (a centered point source has flat |V(u,v)| = pixel_solid_angle)
         amplitudes = np.abs(model_vis)
         assert amplitudes.shape == (n_bl, n_chan)
         # Allow some tolerance for interpolation error
-        np.testing.assert_allclose(amplitudes, 1.0, atol=0.15)
+        np.testing.assert_allclose(amplitudes, pixel_solid_angle, atol=0.15 * pixel_solid_angle)
 
     def test_degrid_vs_direct_dft(self):
         """
@@ -74,7 +75,8 @@ class TestNUFFTEngine:
         engine = NUFFTEngine(cell_size=cell_size)
         model_vis = engine.degrid(cube, u, v, freqs)
 
-        # Direct DFT for comparison
+        # Direct DFT for comparison (include pixel solid angle to match NUFFTEngine)
+        pixel_solid_angle = cell_rad ** 2
         x_rad = (np.arange(nx) - nx / 2 + 0.5) * cell_rad
         y_rad = (np.arange(ny) - ny / 2 + 0.5) * cell_rad
         xx_rad, yy_rad = np.meshgrid(x_rad, y_rad)
@@ -84,7 +86,7 @@ class TestNUFFTEngine:
             phase = -2.0 * np.pi * (u[i] * xx_rad + v[i] * yy_rad)
             kernel = np.exp(1j * phase)
             for ch in range(2):
-                dft_vis[i, ch] = np.sum(cube[ch] * kernel)
+                dft_vis[i, ch] = np.sum(cube[ch] * kernel) * pixel_solid_angle
 
         # Should agree within interpolation tolerance
         np.testing.assert_allclose(

@@ -88,11 +88,14 @@ class Fitter:
         self,
         uvdata: UVDataset,
         forward_model: ForwardModel,
+        weight_scale_factor: float = 1.0,
     ):
         self.uvdata = uvdata
         self.forward_model = forward_model
         self.engine = NUFFTEngine(cell_size=forward_model.cell_size)
-        self.likelihood = VisibilityLikelihood()
+        self.likelihood = VisibilityLikelihood(
+            weight_scale_factor=weight_scale_factor,
+        )
 
     def _objective(self, param_vector: np.ndarray, param_names: list[str]) -> float:
         """
